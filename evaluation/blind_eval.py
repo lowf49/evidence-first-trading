@@ -129,10 +129,10 @@ def build_cmd():
                             out, r = "target", 2.0
                             break
                     else:
-                        if b["h"] <= stop:
+                        if b["h"] >= stop:
                             out, r = "stop", -1.0
                             break
-                        if b["l"] >= target:
+                        if b["l"] <= target:
                             out, r = "target", 2.0
                             break
                 if r is None:
