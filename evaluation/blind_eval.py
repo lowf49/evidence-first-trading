@@ -263,7 +263,6 @@ def score_cmd():
     # baselines
     always_long = {cid: ("FLAT" if a["canary"] else "LONG") for cid, a in answers.items()}
     rule = {}
-    rnd = random.Random(42)
     for cid, a in answers.items():
         if a["canary"]:
             rule[cid] = "FLAT"
@@ -272,10 +271,23 @@ def score_cmd():
         else:
             rule[cid] = {"ORB": a["rule_dir"], "PDH_PROX": "LONG",
                          "PDL_PROX": "SHORT"}[a["setup"]]
-    random_pred = {cid: ("FLAT" if answers[cid]["canary"] else rnd.choice(
-        ["LONG", "SHORT", "FLAT"])) for cid in answers}
+    # random baseline: mean over 200 seeds (a single seed can be a tail draw;
+    # seed-42 scored 36.9% vs sim p025=42.4% - an unlucky stream, not a result)
+    rnd_runs = []
+    for seed in range(200):
+        r2 = random.Random(seed)
+        rp = {cid: ("FLAT" if answers[cid]["canary"] else r2.choice(
+            ["LONG", "SHORT", "FLAT"])) for cid in answers}
+        rnd_runs.append(evaluate(rp, "rand"))
+    agg = dict(rnd_runs[0])
+    for k in ("n_calls", "abstain", "dir_acc", "avg_netR_10bp", "long_bias"):
+        vals = [r[k] for r in rnd_runs if r[k] is not None]
+        agg[k] = round(sum(vals) / len(vals), 4) if vals else None
+    agg["name"] = "BASELINE random (mean of 200 seeds)"
+    agg["sd_dir_acc"] = round((sum((r["dir_acc"] - agg["dir_acc"]) ** 2
+                                   for r in rnd_runs) / len(rnd_runs)) ** 0.5, 4)
     results.append(evaluate(always_long, "BASELINE always-LONG"))
-    results.append(evaluate(random_pred, "BASELINE random(seed42)"))
+    results.append(agg)
     results.append(evaluate(rule, "BASELINE pure-rule (no LLM)"))
 
     import glob
@@ -295,6 +307,33 @@ def score_cmd():
               f"{r['dir_acc']:>7.1%} {str(r['ci']):>13} "
               f"{r['avg_netR_10bp']:>+10.3f} {none_s:>8} {can_s:>6}")
     json.dump(results, open(F("score_report.json"), "w"), indent=1)
+    # paired skill-vs-noskill test within each model (McNemar exact binomial on
+    # cases both conditions actually called)
+    print()
+    bases = sorted({os.path.basename(p)[len("decisions_"):].rsplit("_", 1)[0]
+                    for p in glob.glob(F("decisions_*.json"))})
+    for base in bases:
+        try:
+            s = json.load(open(F(f"decisions_{base}_skill.json")))
+            n = json.load(open(F(f"decisions_{base}_noskill.json")))
+        except FileNotFoundError:
+            continue
+        both = [cid for cid, a in answers.items()
+                if not a["canary"] and a["setup"] != "NONE"
+                and s.get(cid) in ("LONG", "SHORT")
+                and n.get(cid) in ("LONG", "SHORT")]
+        b = sum(1 for cid in both
+                if s[cid] == answers[cid]["dir60"] and n[cid] != answers[cid]["dir60"])
+        c_ = sum(1 for cid in both
+                 if n[cid] == answers[cid]["dir60"] and s[cid] != answers[cid]["dir60"])
+        m = b + c_
+        if m == 0:
+            p = 1.0
+        else:
+            k = min(b, c_)
+            p = min(1.0, 2 * sum(math.comb(m, i) for i in range(k + 1)) / 2 ** m)
+        print(f"paired {base}: both-called n={len(both)}, skill-only-right={b}, "
+              f"noskill-only-right={c_}, exact McNemar p={p:.3f}")
     print("\nwrote score_report.json")
     return 0
 
