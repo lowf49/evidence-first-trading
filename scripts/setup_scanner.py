@@ -49,7 +49,7 @@ def scan(sym):
                    "[Tier A level; entry Tier B]")
     else:
         out.append(f"{sym}: A2 levels: PDH {prev_hi:.2f} ({pdh_dist:+.2f}%), "
-                   f"PDL {prev_lo:.2f} ({pdl_dist:+.2f}%) — not near")
+                   f"PDL {prev_lo:.2f} ({pdl_dist:+.2f}%) - not near")
     # U-shape context (descriptive only)
     out.append(f"{sym}: context: session last bar {last['local']:%H:%M} ET, "
                f"prev close {prev_close:.2f}")
@@ -60,7 +60,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--symbols", required=True)
     a = p.parse_args()
-    print(f"Setup scan — {CATALOG_NOTE}")
+    print(f"Setup scan - {CATALOG_NOTE}")
     print("Output = trigger status only; no direction is predicted.\n")
     for sym in [s.strip().upper() for s in a.symbols.split(",") if s.strip()]:
         try:
