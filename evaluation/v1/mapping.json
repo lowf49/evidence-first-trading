@@ -1,0 +1,14 @@
+{
+ "INST-01": "AMZN",
+ "INST-02": "MSFT",
+ "INST-03": "IWM",
+ "INST-04": "QQQ",
+ "INST-05": "META",
+ "INST-06": "SPY",
+ "INST-07": "AAPL",
+ "INST-08": "AMD",
+ "INST-09": "NVDA",
+ "INST-10": "TSLA",
+ "INST-11": "GLD",
+ "INST-12": "DIA"
+}

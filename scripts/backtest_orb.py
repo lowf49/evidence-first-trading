@@ -19,7 +19,8 @@ import data as D  # noqa: E402
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                    "evaluation", "backtest_results.json")
-DEFAULTS = "SPY,QQQ,IWM,DIA,AAPL,NVDA,TSLA,MSFT,AMD,META,AMZN,GLD"
+DEFAULTS = ("SPY,QQQ,IWM,DIA,AAPL,NVDA,TSLA,MSFT,AMD,META,AMZN,GLD,"
+            "NFLX,JPM,XOM,UNH,COST,DIS,BA,INTC,MU,TLT")
 
 
 def first3_or(bars):
@@ -81,6 +82,52 @@ def backtest_a1(symbols, slippage_bps=(0, 5, 10, 20, 50)):
             risk_bp = risk / e * 10000
             trades.append({
                 "sym": sym, "date": keys[i], "dir": d, "r_gross": r_gross,
+                "outcome": out, "risk_bp": risk_bp,
+                "net": {f"{s}bp": r_gross - (s / risk_bp if risk_bp > 0 else 0)
+                        for s in slippage_bps},
+            })
+    return trades
+
+
+def backtest_a1_hourly(symbols, slippage_bps=(0, 5, 10, 20, 50),
+                       exclude_recent_days=60):
+    """A1 rules on 60m bars over an OLDER, non-overlapping window (period
+    robustness check): OR = first hourly bar of the session, trigger = second
+    bar's close, same stop/target geometry. Only sessions older than
+    exclude_recent_days are used, so this never overlaps A1's <=60d 5m window."""
+    cutoff = time.time() - exclude_recent_days * 86400
+    trades = []
+    for sym in symbols:
+        try:
+            bars = D.sessions(D.fetch_bars(sym, "60m", "730d"))
+        except Exception as e:
+            print(f"  A1b {sym}: fetch failed {e}")
+            continue
+        for key, sess in sorted(bars.items()):
+            if len(sess) < 3 or sess[0]["dt"] >= cutoff:
+                continue
+            or_b, trig = sess[0], sess[1]
+            or_hi, or_lo = or_b["h"], or_b["l"]
+            e = trig["c"]
+            if e > or_hi:
+                d = "LONG"
+            elif e < or_lo:
+                d = "SHORT"
+            else:
+                continue
+            stop = or_lo if d == "LONG" else or_hi
+            risk = abs(e - stop)
+            if risk <= 0:
+                continue
+            target = e + (2 * risk if d == "LONG" else -2 * risk)
+            after = [b for b in sess if b["dt"] > trig["dt"]]
+            out, px = race_outcome(after, e, d, stop, target)
+            if out is None:
+                continue
+            r_gross = (px - e) * (1 if d == "LONG" else -1) / risk
+            risk_bp = risk / e * 10000
+            trades.append({
+                "sym": sym, "date": key, "dir": d, "r_gross": r_gross,
                 "outcome": out, "risk_bp": risk_bp,
                 "net": {f"{s}bp": r_gross - (s / risk_bp if risk_bp > 0 else 0)
                         for s in slippage_bps},
@@ -162,6 +209,25 @@ def main() -> int:
     else:
         print("  no ORB triggers in window")
 
+    print(f"A1b hourly ORB, older window (60-730d ago, {len(syms)} symbols)...")
+    trades_b = backtest_a1_hourly(syms)
+    nb = len(trades_b)
+    if nb:
+        wr_b = sum(t["r_gross"] > 0 for t in trades_b) / nb
+        print(f"  trades={nb}  WR={wr_b:.1%}  "
+              f"expectancy(gross)={sum(t['r_gross'] for t in trades_b) / nb:+.3f}R")
+        for s in (0, 5, 10, 20, 50):
+            e = sum(t["net"][f"{s}bp"] for t in trades_b) / nb
+            print(f"  slippage {s:>2}bp : expectancy {e:+.3f}R/trade  "
+                  f"({'POSITIVE' if e > 0 else 'NEGATIVE'})")
+        for d in ("LONG", "SHORT"):
+            ts = [t for t in trades_b if t["dir"] == d]
+            if ts:
+                print(f"  {d}: n={len(ts)} "
+                      f"WR={sum(t['r_gross'] > 0 for t in ts) / len(ts):.1%}")
+    else:
+        print("  no hourly ORB triggers in older window")
+
     print(f"A2 PDH/PDL touch stats (1d, {a.daily_years}y, {len(syms)} symbols)...")
     a2 = backtest_a2(syms, a.daily_years)
     if a2["n_sessions"]:
@@ -177,7 +243,7 @@ def main() -> int:
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as f:
         json.dump({"run": int(time.time()), "symbols": syms, "A1": trades,
-                   "A2": a2, "A3": a3}, f, indent=1)
+                   "A1b": trades_b, "A2": a2, "A3": a3}, f, indent=1)
     print(f"wrote {os.path.relpath(OUT)}")
     return 0
 

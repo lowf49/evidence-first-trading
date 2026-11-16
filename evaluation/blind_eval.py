@@ -8,11 +8,18 @@ Design (this is what stops models from "guessing off foreknown knowledge"):
   3. NO ABSOLUTE PRICES - features are % / ratios only, so instrument identity
                      can't be recovered from price level.
   4. NO DATES      - sessions anonymized as Cxxx case ids.
-  5. CANARIES      - ~3 cases have impossible features (or_range_pct < 0);
-                     correct behavior = FLAT/abstain. Failing canaries = guessing.
-  6. BASELINES     - scored against always-long / seeded-random / pure-rule so a
-                     model must beat simple heuristics to claim any effect.
+  5. CANARIES      - 12 cases carry impossible features in 3 types
+                     (or_range_pct < 0, or_pos = 99, rvol < 0); correct behavior
+                     = FLAT/abstain. THE CANARY FLAG IS NOT SHOWN TO MODELS
+                     (v2 caveat fix: v1 leaked a "canary" field in the payload).
+                     Failing canaries = guessing without validating inputs.
+  6. BASELINES     - scored against always-long / seeded-random (200-seed mean) /
+                     pure-rule so a model must beat simple heuristics.
   7. DETERMINISTIC OUTCOMES - answers computed by this script in pure Python.
+  8. V2 ADDITIONS  - 22-symbol universe (~740 cases, tighter CIs), payloads
+                     chunked to stay well inside small-context models, split-half
+                     period consistency, paired McNemar + paired netR sign test,
+                     abstention-value analysis (what the skill avoided).
 
 Subcommands:
   python blind_eval.py build     # fetch data, mask, write cases/answers
@@ -20,6 +27,7 @@ Subcommands:
   python blind_eval.py score     # score decisions_*.json against answers + baselines
 """
 import argparse
+import glob
 import json
 import math
 import os
@@ -32,7 +40,9 @@ sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
 import data as D  # noqa: E402
 
 SYMBOLS = ["SPY", "QQQ", "IWM", "DIA", "AAPL", "NVDA", "TSLA",
-           "MSFT", "AMD", "META", "AMZN", "GLD"]
+           "MSFT", "AMD", "META", "AMZN", "GLD",
+           "NFLX", "JPM", "XOM", "UNH", "COST", "DIS", "BA", "INTC", "MU", "TLT"]
+CANARY_TYPES = ["neg_range", "absurd_pos", "neg_rvol"]
 F = lambda name: os.path.join(HERE, name)
 
 SKILL_EXCERPT = """EVIDENCE-FIRST TRADING RULES (skill catalog summary):
@@ -162,16 +172,24 @@ def build_cmd():
     pool = other + keep
     rng.shuffle(pool)
 
-    # assign ids + inject canaries
+    # assign ids + inject canaries (3 types; the flag lives ONLY in answers.json,
+    # never in the payload the models see)
     out_cases, out_answers = [], {}
-    canary_idx = set(rng.sample(range(len(pool)), min(3, len(pool))))
+    n_canary = 12
+    canary_slots = {i: CANARY_TYPES[j % len(CANARY_TYPES)]
+                    for j, i in enumerate(
+                        rng.sample(range(len(pool)), min(n_canary, len(pool))))}
     for i, c in enumerate(pool):
         cid = f"C{i+1:03d}"
         feat = {k: v for k, v in c["feat"].items() if k != "_tag"}
-        is_canary = i in canary_idx
-        if is_canary:
+        ctype = canary_slots.get(i)
+        if ctype == "neg_range":
             feat["or_range_pct"] = -abs(feat["or_range_pct"]) - 0.01  # impossible
-        feat["canary"] = is_canary
+        elif ctype == "absurd_pos":
+            feat["or_pos"] = 99.0  # entry 99 opening-ranges above the low: impossible
+        elif ctype == "neg_rvol":
+            feat["rvol"] = -1.0  # negative volume ratio: impossible
+        feat["canary"] = ctype is not None
         feat["id"] = cid
         out_cases.append(feat)
         out_answers[cid] = {
@@ -179,7 +197,7 @@ def build_cmd():
             "rule_dir": c["pdir"], "dir60": c["dir60"],
             "race_r": round(c["r"], 3), "risk_bp": round(c["risk_bp"], 2),
             "net10bp": round(c["r"] - (10 / c["risk_bp"] if c["risk_bp"] > 0 else 0), 3),
-            "canary": is_canary,
+            "canary": ctype is not None, "canary_type": ctype,
         }
     json.dump(out_cases, open(F("cases.json"), "w"), indent=1)
     json.dump(out_answers, open(F("answers.json"), "w"), indent=1)
@@ -191,27 +209,37 @@ def build_cmd():
 
 def prompt_cmd():
     cases = json.load(open(F("cases.json")))
-    slim = [{k: v for k, v in c.items() if k not in ("setup_hint_is_absent",)}
-            for c in cases]
-    # models see: id, or_pos, or_range_pct, gap_pct, pdh_dist_pct, pdl_dist_pct,
-    # rvol, canary  (NOT setup tag - the tag is what the RULE baseline uses)
-    body = json.dumps([{k: c[k] for k in
-                        ("id", "or_pos", "or_range_pct", "gap_pct",
-                         "pdh_dist_pct", "pdl_dist_pct", "rvol", "canary")}
-                       for c in slim], separators=(",", ":"))
+    # v2: 'canary' key deliberately EXCLUDED - models must detect impossible
+    # features themselves, not read a label. 'setup' tag also excluded (it is
+    # what the deterministic RULE baseline uses; models must infer from features).
+    keys = ("id", "or_pos", "or_range_pct", "gap_pct", "pdh_dist_pct",
+            "pdl_dist_pct", "rvol")
+    slim = [{k: c[k] for k in keys} for c in cases]
     os.makedirs(F("prompts"), exist_ok=True)
+    for old in glob.glob(F("prompts/payload_*.txt")):
+        os.remove(old)
+    # chunk so prompt+completion stays well inside small-context models
+    n_chunks = max(1, math.ceil(len(slim) / 450))
+    step = math.ceil(len(slim) / n_chunks)
     for cond, rules in (("skill", SKILL_EXCERPT), ("noskill", NO_SKILL_PROMPT)):
-        txt = (f"{rules}\n\nCASES (JSON array; all values are %/ratios, no prices, "
-               f"no symbols, no dates):\n{body}\n\nRespond with the JSON object only.")
-        open(F(f"prompts/payload_{cond}.txt"), "w").write(txt)
-    print(f"wrote prompts/payload_skill.txt and payload_noskill.txt "
-          f"({len(body)} chars of cases)")
+        for i in range(n_chunks):
+            body = json.dumps(slim[i * step:(i + 1) * step], separators=(",", ":"))
+            txt = (f"{rules}\n\nCASES (JSON array; all values are %/ratios, no prices, "
+                   f"no symbols, no dates):\n{body}\n\n"
+                   "Respond with the JSON object only.")
+            open(F(f"prompts/payload_{cond}_{i+1}.txt"), "w").write(txt)
+    print(f"wrote {n_chunks} payload part(s) per condition "
+          f"({len(slim)} cases, {len(keys)} visible fields, canary flag hidden)")
     return 0
 
 
 def score_cmd():
     answers = json.load(open(F("answers.json")))
     cases = {c["id"]: c for c in json.load(open(F("cases.json")))}
+    trade_all = [cid for cid, a in answers.items()
+                 if not a["canary"] and a["setup"] != "NONE"]
+    dates = sorted({answers[cid]["date"] for cid in trade_all})
+    mid_date = dates[len(dates) // 2] if dates else ""
 
     def evaluate(preds, name):
         trade_ids, none_ids, can_ids = [], [], []
@@ -230,6 +258,20 @@ def score_cmd():
         wr = correct / n_call if n_call else 0.0
         lo, hi = wilson(wr, n_call)
         z = ((wr - 0.5) / math.sqrt(0.25 / n_call)) if n_call > 30 else None
+        # split-half period consistency (first vs second half of the window)
+        h1 = [(cid, p) for cid, p in calls if answers[cid]["date"] <= mid_date]
+        h2 = [(cid, p) for cid, p in calls if answers[cid]["date"] > mid_date]
+        acc_h1 = (sum(1 for cid, p in h1 if p == answers[cid]["dir60"]) / len(h1)
+                  ) if h1 else None
+        acc_h2 = (sum(1 for cid, p in h2 if p == answers[cid]["dir60"]) / len(h2)
+                  ) if h2 else None
+        # canary FLAT-rate broken down by canary type (flag hidden in v2)
+        can_types = {}
+        for cid in can_ids:
+            t = answers[cid].get("canary_type") or "unknown"
+            can_types.setdefault(t, []).append(preds.get(cid, "FLAT") == "FLAT")
+        can_by_type = {t: round(sum(v) / len(v), 2)
+                       for t, v in sorted(can_types.items())}
         # net R with 10bp slippage on calls (race outcome)
         # P&L uses the PREDICTED direction; race geometry was computed for the
         # rule direction, so a matching call gets net10bp and an opposite call
@@ -257,7 +299,11 @@ def score_cmd():
                 "z_vs_50": round(z, 2) if z else None,
                 "avg_netR_10bp": round(net, 4),
                 "none_flat": none_flat, "canary_flat": can_flat,
-                "long_bias": round(longs / n_call, 3) if n_call else None}
+                "long_bias": round(longs / n_call, 3) if n_call else None,
+                "acc_h1": round(acc_h1, 4) if acc_h1 is not None else None,
+                "acc_h2": round(acc_h2, 4) if acc_h2 is not None else None,
+                "n_h1": len(h1), "n_h2": len(h2),
+                "can_by_type": can_by_type}
 
     results = []
     # baselines
@@ -280,21 +326,27 @@ def score_cmd():
             ["LONG", "SHORT", "FLAT"])) for cid in answers}
         rnd_runs.append(evaluate(rp, "rand"))
     agg = dict(rnd_runs[0])
-    for k in ("n_calls", "abstain", "dir_acc", "avg_netR_10bp", "long_bias"):
+    for k in ("n_calls", "abstain", "dir_acc", "avg_netR_10bp", "long_bias",
+              "none_flat", "canary_flat"):
         vals = [r[k] for r in rnd_runs if r[k] is not None]
         agg[k] = round(sum(vals) / len(vals), 4) if vals else None
     agg["name"] = "BASELINE random (mean of 200 seeds)"
     agg["sd_dir_acc"] = round((sum((r["dir_acc"] - agg["dir_acc"]) ** 2
                                    for r in rnd_runs) / len(rnd_runs)) ** 0.5, 4)
+    # 'CI' for this row = 95% band of per-seed accuracy (not a binomial CI)
+    accs = sorted(r["dir_acc"] for r in rnd_runs)
+    agg["ci"] = [round(accs[int(0.025 * len(accs))], 3),
+                 round(accs[int(0.975 * len(accs)) - 1], 3)]
     results.append(evaluate(always_long, "BASELINE always-LONG"))
     results.append(agg)
     results.append(evaluate(rule, "BASELINE pure-rule (no LLM)"))
 
-    import glob
+    model_preds = []
     for path in sorted(glob.glob(F("decisions_*.json"))):
         name = os.path.basename(path)[len("decisions_"):-len(".json")]
         preds = json.load(open(path))
         results.append(evaluate(preds, f"MODEL {name}"))
+        model_preds.append((name, preds))
 
     w = max(len(r["name"]) for r in results)
     hdr = (f"{'condition':{w}s} {'calls':>5} {'abst':>4} {'dirAcc':>7} "
@@ -307,7 +359,46 @@ def score_cmd():
               f"{r['dir_acc']:>7.1%} {str(r['ci']):>13} "
               f"{r['avg_netR_10bp']:>+10.3f} {none_s:>8} {can_s:>6}")
     json.dump(results, open(F("score_report.json"), "w"), indent=1)
-    # paired skill-vs-noskill test within each model (McNemar exact binomial on
+
+    # split-half period consistency (did the result hold across the window?)
+    print(f"\nperiod split (median session {mid_date}) - dir acc first/second half:")
+    for r in results:
+        s1 = (f"{r['acc_h1']:.1%} (n={r['n_h1']})"
+              if r.get("acc_h1") is not None else "-")
+        s2 = (f"{r['acc_h2']:.1%} (n={r['n_h2']})"
+              if r.get("acc_h2") is not None else "-")
+        print(f"  {r['name']:<36} {s1:>18} | {s2:>18}")
+
+    # canary compliance by type - flag is HIDDEN from models in v2
+    print("\ncanary FLAT-rate by type (flag hidden from models):")
+    for r in results:
+        if r.get("can_by_type"):
+            print(f"  {r['name']:<36} {r['can_by_type']}")
+
+    # abstention value: mean netR@10bp of tradeable cases taken vs skipped
+    # (skipped cases valued at the pure-rule direction = the deterministic
+    # alternative you get without the model)
+    print("\nabstention value (mean netR@10bp over tradeable cases):")
+    all_rule = [answers[cid]["net10bp"] for cid in trade_all]
+    print(f"  {'pure-rule (takes everything)':<28} n={len(all_rule):>3} "
+          f"mean {sum(all_rule) / len(all_rule):+.3f}R")
+    for name, preds in model_preds:
+        taken, skipped = [], []
+        for cid in trade_all:
+            a = answers[cid]
+            rd = {"ORB": a["rule_dir"], "PDH_PROX": "LONG",
+                  "PDL_PROX": "SHORT"}[a["setup"]]
+            p = preds.get(cid, "FLAT")
+            if p in ("LONG", "SHORT"):
+                taken.append(a["net10bp"] if p == rd else -a["net10bp"])
+            else:
+                skipped.append(a["net10bp"])
+        t_m = sum(taken) / len(taken) if taken else float("nan")
+        s_m = sum(skipped) / len(skipped) if skipped else float("nan")
+        print(f"  {name:<28} taken n={len(taken):>3} mean {t_m:+.3f}R | "
+              f"skipped n={len(skipped):>3} mean {s_m:+.3f}R")
+
+    # paired skill-vs-noskill test within each model (exact binomial on
     # cases both conditions actually called)
     print()
     bases = sorted({os.path.basename(p)[len("decisions_"):].rsplit("_", 1)[0]
@@ -334,6 +425,25 @@ def score_cmd():
             p = min(1.0, 2 * sum(math.comb(m, i) for i in range(k + 1)) / 2 ** m)
         print(f"paired {base}: both-called n={len(both)}, skill-only-right={b}, "
               f"noskill-only-right={c_}, exact McNemar p={p:.3f}")
+        # paired netR sign test on the same cases (skill call vs noskill call)
+        diffs = []
+        for cid in both:
+            a = answers[cid]
+            rd = {"ORB": a["rule_dir"], "PDH_PROX": "LONG",
+                  "PDL_PROX": "SHORT"}[a["setup"]]
+            vs = a["net10bp"] if s[cid] == rd else -a["net10bp"]
+            vn = a["net10bp"] if n[cid] == rd else -a["net10bp"]
+            diffs.append(vs - vn)
+        pos = sum(1 for d in diffs if d > 0)
+        neg = sum(1 for d in diffs if d < 0)
+        m2 = pos + neg
+        if m2:
+            p2 = min(1.0, 2 * sum(math.comb(m2, i)
+                                  for i in range(min(pos, neg) + 1)) / 2 ** m2)
+        else:
+            p2 = 1.0
+        print(f"  netR sign test on those cases: skill ahead on {pos}, "
+              f"noskill ahead on {neg}, ties {len(diffs) - m2}, exact p={p2:.3f}")
     print("\nwrote score_report.json")
     return 0
 

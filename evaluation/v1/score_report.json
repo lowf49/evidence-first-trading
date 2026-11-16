@@ -1,0 +1,108 @@
+[
+ {
+  "name": "BASELINE always-LONG",
+  "n_calls": 228,
+  "abstain": 0,
+  "dir_acc": 0.4561,
+  "ci": [
+   0.393,
+   0.521
+  ],
+  "z_vs_50": -1.32,
+  "avg_netR_10bp": -0.0882,
+  "none_flat": 0.0,
+  "canary_flat": 1.0,
+  "long_bias": 1.0
+ },
+ {
+  "name": "BASELINE random (mean of 200 seeds)",
+  "n_calls": 152.71,
+  "abstain": 75.29,
+  "dir_acc": 0.5023,
+  "ci": [
+   0.368,
+   0.529
+  ],
+  "z_vs_50": -1.25,
+  "avg_netR_10bp": -0.0118,
+  "none_flat": 0.34,
+  "canary_flat": 1.0,
+  "long_bias": 0.5001,
+  "sd_dir_acc": 0.0402
+ },
+ {
+  "name": "BASELINE pure-rule (no LLM)",
+  "n_calls": 228,
+  "abstain": 0,
+  "dir_acc": 0.557,
+  "ci": [
+   0.492,
+   0.62
+  ],
+  "z_vs_50": 1.72,
+  "avg_netR_10bp": -0.4412,
+  "none_flat": 1.0,
+  "canary_flat": 1.0,
+  "long_bias": 0.522
+ },
+ {
+  "name": "MODEL gemma_noskill",
+  "n_calls": 227,
+  "abstain": 1,
+  "dir_acc": 0.5286,
+  "ci": [
+   0.464,
+   0.593
+  ],
+  "z_vs_50": 0.86,
+  "avg_netR_10bp": 0.0128,
+  "none_flat": 0.0,
+  "canary_flat": 0.0,
+  "long_bias": 0.489
+ },
+ {
+  "name": "MODEL gemma_skill",
+  "n_calls": 173,
+  "abstain": 55,
+  "dir_acc": 0.5491,
+  "ci": [
+   0.475,
+   0.621
+  ],
+  "z_vs_50": 1.29,
+  "avg_netR_10bp": 0.0751,
+  "none_flat": 0.7333333333333333,
+  "canary_flat": 1.0,
+  "long_bias": 0.595
+ },
+ {
+  "name": "MODEL nemotron_noskill",
+  "n_calls": 194,
+  "abstain": 34,
+  "dir_acc": 0.4897,
+  "ci": [
+   0.42,
+   0.56
+  ],
+  "z_vs_50": -0.29,
+  "avg_netR_10bp": 0.0354,
+  "none_flat": 0.03333333333333333,
+  "canary_flat": 0.0,
+  "long_bias": 0.691
+ },
+ {
+  "name": "MODEL nemotron_skill",
+  "n_calls": 137,
+  "abstain": 91,
+  "dir_acc": 0.4964,
+  "ci": [
+   0.414,
+   0.579
+  ],
+  "z_vs_50": -0.09,
+  "avg_netR_10bp": 0.1625,
+  "none_flat": 0.2866666666666667,
+  "canary_flat": 1.0,
+  "long_bias": 0.81
+ }
+]

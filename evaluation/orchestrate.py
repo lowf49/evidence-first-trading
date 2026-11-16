@@ -72,17 +72,24 @@ def call(model_id: str, prompt: str, max_tokens: int = 8000) -> dict:
 
 
 def run(model: str | None, cond: str | None) -> int:
+    payloads = sorted(glob.glob(os.path.join(HERE, "prompts", "payload_*.txt")))
+    if not payloads:
+        sys.exit("no payloads found - run: python blind_eval.py prompt")
     for m in ([model] if model else list(MODELS)):
-        for c in ([cond] if cond else ["skill", "noskill"]):
-            out = os.path.join(HERE, f"raw_{m}_{c}.json")
-            if os.path.exists(out):
-                print(f"skip {m}/{c} (exists)")
+        for path in payloads:
+            stem = os.path.basename(path)[len("payload_"):-4]  # skill_1
+            c, part = stem.rsplit("_", 1)
+            if cond and c != cond:
                 continue
-            payload = open(os.path.join(HERE, "prompts", f"payload_{c}.txt")).read()
-            print(f"calling {MODELS[m]} cond={c} "
+            out = os.path.join(HERE, f"raw_{m}_{c}_{part}.json")
+            if os.path.exists(out):
+                print(f"skip {m}/{c} part {part} (exists)")
+                continue
+            payload = open(path).read()
+            print(f"calling {MODELS[m]} cond={c} part {part} "
                   f"(prompt {len(payload)} chars)...", flush=True)
             try:
-                resp = call(MODELS[m], payload)
+                resp = call(MODELS[m], payload, max_tokens=9000)
             except Exception as e:
                 detail = e.read().decode()[:500] if hasattr(e, "read") else str(e)
                 print(f"  FAILED: {detail}")
@@ -92,29 +99,39 @@ def run(model: str | None, cond: str | None) -> int:
             usage = resp.get("usage", {})
             print(f"  done: {len(content)} chars, usage={usage}, "
                   f"finish={choice.get('finish_reason')}")
-            json.dump({"model": MODELS[m], "cond": c, "usage": usage,
-                       "content": content},
+            json.dump({"model": MODELS[m], "cond": c, "part": part,
+                       "usage": usage, "content": content},
                       open(out, "w"), indent=1)
     return 0
 
 
 def parse() -> int:
+    groups = {}
     for path in sorted(glob.glob(os.path.join(HERE, "raw_*.json"))):
-        stem = os.path.basename(path)[4:-5]  # gemma_skill
-        raw = json.load(open(path))
-        content = raw["content"]
-        # strip code fences / prose, find the JSON object
-        m = re.search(r"\{.*\}", content, re.S)
+        m = re.match(r"raw_(\w+)_(skill|noskill)_(\d+)\.json$",
+                     os.path.basename(path))
         if not m:
-            print(f"{stem}: NO JSON FOUND ({content[:120]!r})")
+            print(f"skip unrecognized raw file: {os.path.basename(path)}")
             continue
-        try:
-            obj = json.loads(m.group(0))
-        except json.JSONDecodeError as e:
-            print(f"{stem}: JSON decode failed ({e}); content head: {content[:200]!r}")
-            continue
-        cases = json.load(open(os.path.join(HERE, "cases.json")))
-        valid = {c["id"] for c in cases}
+        groups.setdefault((m.group(1), m.group(2)), []).append(
+            (int(m.group(3)), path))
+    if not groups:
+        sys.exit("no raw files found - run: python orchestrate.py run")
+    cases = json.load(open(os.path.join(HERE, "cases.json")))
+    valid = {c["id"] for c in cases}
+    for (model, cond), parts in sorted(groups.items()):
+        obj = {}
+        for _, path in sorted(parts):
+            content = json.load(open(path))["content"]
+            mm = re.search(r"\{.*\}", content, re.S)
+            if not mm:
+                print(f"{model}/{cond}: NO JSON in {os.path.basename(path)}")
+                continue
+            try:
+                obj.update(json.loads(mm.group(0)))
+            except json.JSONDecodeError as e:
+                print(f"{model}/{cond}: decode failed on "
+                      f"{os.path.basename(path)}: {e}")
         preds = {}
         for k, v in obj.items():
             if k in valid and isinstance(v, str):
@@ -123,10 +140,10 @@ def parse() -> int:
         missing = valid - set(preds)
         for cid in missing:
             preds[cid] = "FLAT"  # abstain on anything not answered
-        outp = os.path.join(HERE, f"decisions_{stem}.json")
+        outp = os.path.join(HERE, f"decisions_{model}_{cond}.json")
         json.dump(preds, open(outp, "w"), indent=1)
-        print(f"{stem}: {len(preds)} decisions "
-              f"({len(missing)} defaulted FLAT) -> decisions_{stem}.json")
+        print(f"{model}_{cond}: {len(preds)} decisions from {len(parts)} part(s) "
+              f"({len(missing)} defaulted FLAT) -> decisions_{model}_{cond}.json")
     return 0
 
 

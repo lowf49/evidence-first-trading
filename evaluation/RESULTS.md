@@ -1,121 +1,185 @@
 # Validation results
 
 Three layers of validation, all reproducible from this directory.
+**Current results are v2** (v1 artifacts archived in `evaluation/v1/` — see
+"design fixes" below).
 
 ---
 
 ## Part 1 — Deterministic historical backtest
-(`python scripts/backtest_orb.py`, run 2026-11-16)
+(`python scripts/backtest_orb.py`, run 2026-11-16, 22 symbols)
 
-Window: 12 instruments (SPY QQQ IWM DIA AAPL NVDA TSLA MSFT AMD META AMZN GLD),
-5m bars ≤60d for intraday parts, 10y daily for level stats. Data: Yahoo Finance.
+Universe: SPY QQQ IWM DIA AAPL NVDA TSLA MSFT AMD META AMZN GLD NFLX JPM XOM
+UNH COST DIS BA INTC MU TLT. Data: Yahoo Finance.
 
-### A1 — Opening Range Breakout (exact catalog rules, n=166 trades)
+### A1 — Opening Range Breakout, 5m bars (exact catalog rules, 60d window, n=311)
 
 | Metric | Result |
 |---|---|
-| Win rate | **47.6%** (LONG 42.4% n=85, SHORT 53.1% n=81) |
-| Expectancy @ 0bp slippage | **+0.088R** (positive) |
-| @ 5bp | +0.006R (marginal) |
-| @ 10bp | **−0.076R (NEGATIVE)** |
-| @ 20bp | −0.240R |
-| @ 50bp | −0.732R |
+| Win rate | **50.8%** (LONG 47.2% n=161, SHORT 54.7% n=150) |
+| Expectancy @ 0bp slippage | **+0.076R** |
+| @ 5bp | +0.002R (marginal) |
+| @ 10bp | **−0.071R (NEGATIVE)** |
+| @ 20bp / 50bp | −0.219R / −0.661R |
 
-**Verdict: the skill's own Tier-A setup fails its own slippage sweep at 10bp —
-exactly what the research predicted (ORB is cost-critical).** The skill would
-flag this as FRAGILE, not tradeable without a cost advantage.
+**Fails the 10bp slippage sweep** — the skill would flag FRAGILE.
 
-### A2 — PDH/PDL touch statistics (n=30,156 sessions, 10y, 12 symbols)
+### A1b — Hourly ORB on an OLDER, non-overlapping window (60–730 days ago, n=4,974)
 
-| Stat | Result | Vendor claim |
-|---|---|---|
-| Touch ≥1 prior-day level | **75.6%** | 89–91% (index futures) |
-| Touch both | **8.8%** | ~10% (index futures) |
-| Touch PDH | 45.2% | — |
-| Touch PDL | 39.2% | — |
+| Metric | Result |
+|---|---|
+| Win rate | 48.5% |
+| Expectancy @ 0bp | **−0.003R — no edge even with zero costs** |
+| @ 10bp | −0.098R |
 
-Honest divergence: single-stock/ETF touch rates run ~13pp below the vendor
-index-futures numbers; the both-sweeps figure matches. The skill records its
-own measured number over the vendor's.
+**Period-robustness check FAILS the setup**: in the longer historical window
+the same breakout geometry has no expectancy at all before costs. This is the
+strongest negative result in the skill's own testing and is recorded as such.
 
-### A3 — Last-30-min momentum (n=718 sessions)
+### A2 — PDH/PDL touch statistics (1d, 10y, n=55,286 sessions)
 
-Sign accuracy **40.9%** — below chance in this 60-day window vs Baltussen et
-al.'s 53–56% (45-year study). Recorded as NOT confirmed in this sample.
+| Stat | v2 result | v1 (12 symbols) | Vendor claim |
+|---|---|---|---|
+| Touch ≥1 level | **76.2%** | 75.6% | 89–91% (index futures) |
+| Touch both | **8.9%** | 8.8% | ~10% |
+| Touch PDH | 45.1% | 45.2% | — |
+| Touch PDL | 40.0% | 39.2% | — |
+
+Highly stable across universe expansion; still ~13pp below vendor index-futures
+claims for single stocks/ETFs.
+
+### A3 — Last-30-min momentum (5m, n=1,316 sessions)
+
+Sign accuracy **45.4%** — below chance again (v1: 40.9%), vs Baltussen et al.'s
+53–56% over 45 years. **Not confirmed in this sample** (two windows now).
 
 ---
 
-## Part 2 — Blind LLM evaluation (gemma vs nemotron, ± skill excerpt)
+## Part 2 — Blind LLM evaluation v2 (gemma vs nemotron, ± skill excerpt)
 
-### Design (anti-foreknowledge controls)
+### Design fixes from v1 (the caveats you flagged)
 
-1. **Data recency** — Yahoo 5m window Oct–Nov 2026 (after any plausible
-   training cutoff).
-2. **Symbol masking** — `INST-01..12` with a hidden random mapping
-   (`mapping.json`, never shown to models).
-3. **No absolute prices, no dates** — features are % / ratios only, so
-   instrument identity can't be recovered from price level.
-4. **Canaries** — 3 cases carry impossible features (`or_range_pct < 0`);
-   correct behavior = FLAT. Trading them = guessing without reading inputs.
-5. **Baselines** — always-LONG, random (mean of 200 seeds), pure-rule.
-6. **Deterministic outcomes** — computed by `blind_eval.py` in pure Python.
-7. **Direct API, temperature 0** — `orchestrate.py`, ~$0.015 total, model
-   replies archived as `raw_*.json`.
+| Caveat | Fix in v2 |
+|---|---|
+| v1 leaked a `"canary"` field in the payload | **Flag stripped** — models see 7 fields only; canaries must be detected from impossible values |
+| n=3 canaries | **12 canaries, 3 types** (`or_range_pct<0`, `or_pos=99`, `rvol<0`) |
+| One window, ±7pp CIs | **22 symbols → 701 cases / 417 tradeable**, plus split-half period reporting |
+| netR not paired | **Paired netR sign test** added alongside McNemar |
+| Single-fat-prompt risk for small models | Payloads chunked (2 parts × 450 cases), merged at parse |
 
-Dataset: **381 cases** (228 tradeable, 132 no-setup controls, 3 canaries).
+Remaining limitations (cannot be fixed here): single 60d window (Yahoo caps 5m
+data at 60 days; older-period coverage comes from Part 1 A1b instead), models
+received a condensed rules excerpt rather than the full skill workflow, and
+netR uses a mirror approximation when a model's direction differs from the
+rule's. v1 (n=381) is archived in `evaluation/v1/` for comparison.
 
-### Results (60-minute direction accuracy)
+### Results (60-minute direction accuracy; 417 tradeable cases)
 
-| Condition | Calls | Abstain | Dir acc | 95% CI | netR @10bp | No-setup→FLAT | Canary→FLAT |
+| Condition | Calls | Abstain | Dir acc | 95% CI | netR@10bp | No-setup→FLAT | Canary→FLAT |
 |---|---|---|---|---|---|---|---|
-| BASELINE always-LONG | 228 | 0 | 45.6% | [39.3, 52.1] | −0.088 | 0% | 100% |
-| BASELINE random (200-seed mean) | 153 | 75 | 50.2% | — | −0.012 | 34% | 100% |
-| BASELINE pure-rule (no LLM) | 228 | 0 | 55.7% | [49.2, 62.0] | −0.441 | 100% | 100% |
-| **gemma + skill** | 173 | 55 | **54.9%** | [47.5, 62.1] | **+0.075** | **73%** | **100%** |
-| gemma no skill | 227 | 1 | 52.9% | [46.4, 59.3] | +0.013 | 0% | **0%** |
-| nemotron + skill | 137 | 91 | 49.6% | [41.4, 57.9] | **+0.163** | 29% | **100%** |
-| nemotron no skill | 194 | 34 | 49.0% | [42.0, 56.0] | +0.035 | 3% | **0%** |
+| always-LONG | 417 | 0 | 45.8% | [41.1, 50.6] | −0.092 | 0% | 100% |
+| random (200-seed mean) | 280 | 137 | 49.8% | [44.4, 54.3]* | −0.010 | 33% | 100% |
+| pure-rule (no LLM) | 417 | 0 | 54.4% | [49.6, 59.2] | −0.329 | 100% | 100% |
+| **gemma + skill** | 210 | 207 | **55.7%** | [49.0, 62.3] | **+0.171** | **92%** | 25% |
+| gemma no skill | 405 | 12 | 48.9% | [44.1, 53.7] | −0.082 | 0% | 0% |
+| nemotron + skill | 259 | 158 | 51.0% | [44.9, 57.0] | −0.026 | 15% | **67%** |
+| nemotron no skill | 417 | 0 | 50.1% | [45.3, 54.9] | +0.010 | 0% | 8% |
 
-Paired exact McNemar (cases both conditions called):
-gemma skill-vs-noskill: 25 vs 19, **p = 0.45** · nemotron: 2 vs 6, **p = 0.29**.
+\* random row CI = 95% band across 200 seeds, not a binomial CI.
+
+### Trade quality of taken calls (net of 10bp slippage)
+
+| Condition | Calls | Dir acc | Trade WR | Avg win | Avg loss | **Total R** | Coverage (ITT) |
+|---|---|---|---|---|---|---|---|
+| gemma + skill | 210 | 55.7% | 49.5% | +1.17R | −0.81R | **+35.9R** | 28.1% |
+| gemma no skill | 405 | 48.9% | 44.9% | +1.11R | −1.06R | **−33.3R** | 47.5% |
+| nemotron + skill | 259 | 51.0% | 45.6% | +1.23R | −1.07R | −6.8R | 31.7% |
+| nemotron no skill | 417 | 50.1% | 47.0% | +1.16R | −1.01R | +4.1R | 50.1% |
+
+### Mechanism: what the skill actually did (abstention value)
+
+| Condition | Taken cases (mean netR) | Skipped cases (mean netR) |
+|---|---|---|
+| pure-rule (takes everything) | n=417, **−0.328R** | — |
+| gemma no skill | n=405, −0.082R | n=12, −0.281R |
+| **gemma + skill** | n=210, **+0.171R** | n=207, **−0.360R** |
+| nemotron + skill | n=259, −0.026R | n=158, −0.137R |
+
+**The skill made gemma skip exactly the losing half**: the 207 cases it
+refused would have averaged −0.360R each; the 210 it took averaged +0.171R.
+This is selection, not prediction — the skill did not change any single
+trade's payoff, it changed *which* trades were taken.
+
+### Paired tests (both conditions called the same case)
+
+- **gemma: McNemar 39 vs 19, exact p = 0.012** (significant; survives
+  Bonferroni for 2 models). netR sign test 36 vs 22, p = 0.087 (marginal).
+- nemotron: McNemar 5 vs 2, p = 0.453 (no effect). netR sign p = 1.000.
+
+### Split-half period consistency (median session 2026-10-05)
+
+gemma+skill: 51.5% first half → 59.5% second half — **its accuracy gain is
+concentrated in period 2**, so the absolute-direction claim is not
+period-robust. Pure-rule (53.5/55.4) and the no-skill models (~49–51% both
+halves) were stable. The *selection/abstention* effect, not direction, is the
+robust finding.
+
+### Canary compliance by type (flag hidden)
+
+| Condition | absurd_pos | neg_range | neg_rvol |
+|---|---|---|---|
+| gemma no skill | 0% | 0% | 0% |
+| gemma + skill | 0% | 50% | 25% |
+| nemotron no skill | 0% | 0% | 25% |
+| **nemotron + skill** | **75%** | 50% | **75%** |
+
+**Honest correction of v1**: with the label stripped, skill-conditioned
+compliance is 25% (gemma) / 67% (nemotron) — *not* the 100% v1 showed.
+v1's perfect score was largely the leaked `"canary"` field being obeyed. The
+real input-validation effect exists but is modest and model-dependent
+(nemotron, despite weaker rule-following on setups, was the better canary
+detector).
 
 ### Findings
 
-1. **No model shows a real directional edge.** Every confidence interval
-   includes 50%. The blind design worked: with masked symbols, %-only
-   features and post-cutoff data, there is no foreknowledge to exploit — and
-   none was found.
-2. **The skill's effect is behavioral, not predictive.** With the skill
-   excerpt: canary compliance jumps **0% → 100%** for both models (without it
-   they traded impossible inputs — direct evidence of guessing), no-setup
-   abstention rises (gemma 0% → 73%), and net expectancy at 10bp improves in
-   both models (+0.013→+0.075, +0.035→+0.163). Direction accuracy itself does
-   not improve significantly (McNemar p = 0.45 / 0.29).
-3. **Model choice matters for rule-following, not for prediction.**
-   gemma-4-31b applied the no-setup rule far better than
-   nemotron-3.5-lightning (73% vs 29% FLAT on controls) and abstained more
-   sensibly (abstains on setups: gemma 24% of tradeables vs nemotron 40%,
-   while nemotron still called 71% of no-setup cases). Direction accuracy
-   differences between models are not statistically significant.
-4. **The deterministic pure rule matched or beat every model on raw accuracy**
-   (55.7%) — consistent with the skill's thesis: LLMs add process discipline
-   (input validation, abstention, cost awareness), not predictive power. The
-   rule's negative netR comes from mechanically trading every PDH/PDL-prox
-   case, which models with the skill selectively avoided.
+1. **No proven absolute edge for any condition** — every CI still includes or
+   touches 50%. Nobody can claim "the model predicts direction" from this.
+2. **The skill's effect on gemma is real and now statistically significant**
+   (paired p = 0.012): +48.9% → +55.7% on shared cases, and economically
+   large (−33.3R → +35.9R over the window) via abstention from the
+   negative-expectancy half of setups.
+3. **The mechanism is preventive**: refusal ("don't take this trade"),
+   92% no-setup refusal, cost/tier gates — which raises the *average quality
+   of taken trades*, not the payoff of any trade and not the win rate
+   (gemma+skill's trade win rate was 49.5% — below a coin flip — yet
+   expectancy positive because avgWin 1.17R > avgLoss 0.81R).
+4. **Model choice matters**: nemotron does not convert the skill into better
+   outcomes (ns, −6.8R) though it is the better canary detector. A weaker
+   model can follow safety micro-rules yet fail to apply selection logic.
+5. **Coverage is the price**: skill conditions answer fewer cases correctly
+   in absolute terms (ITT 28–32% vs 47–50%) — the skill trades quantity for
+   quality. That is the intended design, but it means it cannot manufacture
+   accuracy on setups it declines to call.
 
 ### Reproduce
 
 ```bash
-python evaluation/blind_eval.py build    # rebuild cases/answers (data shifts daily)
-python evaluation/blind_eval.py prompt
-python evaluation/orchestrate.py run     # calls OpenRouter (key from opencode auth)
-python evaluation/orchestrate.py parse
-python evaluation/blind_eval.py score    # table + McNemar + score_report.json
+python scripts/backtest_orb.py          # Part 1 (A1/A1b/A2/A3)
+python evaluation/blind_eval.py build   # rebuild cases/answers (data shifts daily)
+python evaluation/blind_eval.py prompt  # chunked payloads, canary flag hidden
+python evaluation/orchestrate.py run    # calls OpenRouter (key from opencode auth)
+python evaluation/orchestrate.py parse  # merge parts -> decisions_<model>_<cond>.json
+python evaluation/blind_eval.py score   # table + splits + paired tests + score_report.json
 ```
+
+Cost of the v2 model run: **≈ $0.031** (8 calls, temperature 0, max_tokens
+9000). v1 cost ≈ $0.015.
 
 ---
 
-**Bottom line:** the skill's value is loss-prevention and process — verified
-by canary compliance, selective abstention, and cost-gated math — not alpha.
-This matches the underlying research: no published mechanism turns an LLM (or
-a retail trader) into a net-of-cost directional predictor.
+**Bottom line:** the skill is a loss-prevention and selection layer — it made
+one model skip the losing half of its own opportunities and turned a −33R
+stream into a +36R stream *in simulation*, while producing zero evidence of
+predictive ability and only modest evidence of input validation. No published
+mechanism turns an LLM (or a retail trader) into a net-of-cost directional
+predictor; the value is in what it refuses to do.

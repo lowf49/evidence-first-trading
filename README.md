@@ -53,10 +53,13 @@ python scripts/backtest_orb.py
 python evaluation/blind_eval.py build
 python evaluation/blind_eval.py prompt
 
-# 3. Send prompts/payload_{skill,noskill}.txt to any two LLMs, save replies as
-#    evaluation/decisions_<name>.json  (map id -> LONG/SHORT/FLAT)
+# 3. Call any two LLMs (or send the payloads manually - chunked files
+#    prompts/payload_<cond>_<n>.txt, canary flag hidden from models):
+python evaluation/orchestrate.py run      # -> raw_<model>_<cond>_<n>.json
+python evaluation/orchestrate.py parse    # -> decisions_<model>_<cond>.json
 
-# 4. Score vs baselines (always-long / random / pure-rule)
+# 4. Score vs baselines (always-long / random / pure-rule), paired tests,
+#    split-half periods, canary-by-type, abstention value
 python evaluation/blind_eval.py score
 ```
 
